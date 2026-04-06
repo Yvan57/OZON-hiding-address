@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OZON Hiding Address
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Скрытие адреса на страницах ozon.ru: blur, удаление или подмена на случайный адрес
 // @author       Yvan57/OZON-hiding-address
 // @match        https://www.ozon.ru/*
@@ -17,15 +17,15 @@
 (function () {
     'use strict';
 
-    // Ключи хранилища
-    const KEY_SPOOF  = 'ozon_ha_spoof_addr';
-    const KEY_BLUR   = 'ozon_ha_blur';
-    const KEY_DEL    = 'ozon_ha_del';
+    const KEY_SPOOF    = 'ozon_ha_spoof_addr';
+    const KEY_BLUR     = 'ozon_ha_blur';
+    const KEY_DEL      = 'ozon_ha_del';
     const KEY_SPOOF_ON = 'ozon_ha_spoof_on';
-    const API_URL    = 'https://api.randomdatatools.ru/?count=1&params=Address';
-    const POLL_MS    = 400;
+    const KEY_PVZ      = 'ozon_ha_pvz';
+    const API_URL      = 'https://api.randomdatatools.ru/?count=1&params=Address';
+    const POLL_MS      = 400;
 
-    // Селекторы узлов с текстом адреса (только span с самим текстом)
+    // Адрес в хедере и карточке товара
     const SEL_ADDR = [
         '[data-widget="addressBookBarWeb"] .checkout_a6o span.tsBody400Small',
         '[data-addressbookbar] .checkout_a6o span.tsBody400Small',
@@ -34,7 +34,7 @@
         '.pdp_t6 span.tsCompact400Small',
     ].join(', ');
 
-    // Селекторы блоков-контейнеров адреса (для del — скрываем целиком)
+    // Контейнеры адреса (для del)
     const SEL_CONTAINER = [
         '[data-widget="addressBookBarWeb"] .checkout_ao9',
         '[data-addressbookbar] .checkout_ao9',
@@ -42,6 +42,11 @@
         '.q6b3_2_2-a',
         '.pdp_t6',
     ].join(', ');
+
+    // Адреса в карточках ПВЗ (меню выбора)
+    const SEL_PVZ_ADDR = '.checkout_a6q span.tsBody400Small';
+    // Номера ПВЗ
+    const SEL_PVZ_NUM  = '.checkout_q6a span.tsBody300XSmall';
 
     GM_addStyle(`
         #ozon-ha-box {
@@ -68,6 +73,8 @@
         .ha-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
         .ha-row { display: flex; gap: 6px; align-items: center; }
         .ha-label { font-size: 11px; font-weight: 600; color: #444; min-width: 46px; }
+        .ha-divider { border: none; border-top: 1px solid #e9ecef; margin: 2px 0; }
+        .ha-section-title { font-size: 10px; color: #999; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
         .ha-btn {
             flex: 1; padding: 6px 4px; border-radius: 8px; cursor: pointer; font-weight: 600;
             font-size: 11px; border: 1.5px solid; transition: all .15s; text-align: center;
@@ -77,6 +84,7 @@
         .ha-btn.on-blur  { background: #e7f3ff; border-color: #005bff; color: #005bff; }
         .ha-btn.on-del   { background: #ffe6e6; border-color: #FF3B30; color: #FF3B30; }
         .ha-btn.on-spoof { background: #e8f8ee; border-color: #34C759; color: #248a3d; }
+        .ha-btn.on-pvz   { background: #fff3e0; border-color: #FF9500; color: #b96000; }
         .ha-spoof-block { display: none; flex-direction: column; gap: 6px; }
         .ha-spoof-block.visible { display: flex; }
         .ha-spoof-addr {
@@ -107,9 +115,7 @@
             box-shadow: 0 4px 16px rgba(0,91,255,.3); font-weight: 600; transition: all .2s;
         }
         #ozon-ha-toggle:hover { background: #0041cc; transform: translateY(-2px); }
-        #ozon-ha-toggle.hidden-mode {
-            opacity: 0; pointer-events: none;
-        }
+        #ozon-ha-toggle.hidden-mode { opacity: 0; pointer-events: none; }
         .ha-hide-row { display: flex; justify-content: flex-end; }
         .ha-hide-btn {
             font-size: 10px; color: #999; background: none; border: none;
@@ -129,6 +135,7 @@
                 <button id="ozon-ha-close">✕</button>
             </div>
             <div class="ha-body">
+                <span class="ha-section-title">Основной адрес</span>
                 <div class="ha-row">
                     <span class="ha-label">Spoof</span>
                     <button class="ha-btn" id="ha-btn-spoof">Подмена адреса</button>
@@ -147,6 +154,13 @@
                     <span class="ha-label">Del</span>
                     <button class="ha-btn" id="ha-btn-del">Удаление</button>
                 </div>
+                <hr class="ha-divider">
+                <span class="ha-section-title">Меню выбора ПВЗ</span>
+                <div class="ha-row">
+                    <span class="ha-label">ПВЗ</span>
+                    <button class="ha-btn" id="ha-btn-pvz">Скрыть адреса ПВЗ</button>
+                </div>
+                <hr class="ha-divider">
                 <div class="ha-row" style="justify-content:flex-end; gap:6px;">
                     <button class="ha-reset" id="ha-reset">🗑 Сбросить всё</button>
                 </div>
@@ -166,27 +180,28 @@
 
     class AddressHider {
         constructor() {
-            // Состояние каждого режима независимо
             this.state = {
                 spoof: GM_getValue(KEY_SPOOF_ON, false),
                 blur:  GM_getValue(KEY_BLUR, false),
                 del:   GM_getValue(KEY_DEL, false),
+                pvz:   GM_getValue(KEY_PVZ, false),
             };
-            this.spoofAddress = GM_getValue(KEY_SPOOF, '');
-            // Оригинальные тексты для восстановления при сбросе spoof
-            this._origTexts = new Map();
-            // Узлы, скрытые через del
-            this._delNodes = new Set();
-            this._pollTimer = null;
-            this._observer = null;
+            this.spoofAddress  = GM_getValue(KEY_SPOOF, '');
+            this._origTexts    = new Map(); // spoof: node -> originalText
+            this._pvzOrigTexts = new Map(); // pvz spoof: node -> originalText
+            this._delNodes     = new Set();
+            this._pollTimer    = null;
+            this._observer     = null;
+            this._spoofLoading = false;
 
             const { box, toggle } = createUI();
-            this.box = box;
+            this.box    = box;
             this.toggle = toggle;
             this.el = {
                 btnSpoof:   box.querySelector('#ha-btn-spoof'),
                 btnBlur:    box.querySelector('#ha-btn-blur'),
                 btnDel:     box.querySelector('#ha-btn-del'),
+                btnPvz:     box.querySelector('#ha-btn-pvz'),
                 spoofBlock: box.querySelector('#ha-spoof-block'),
                 spoofAddr:  box.querySelector('#ha-spoof-addr'),
                 refresh:    box.querySelector('#ha-refresh'),
@@ -199,24 +214,20 @@
             this._startObserver();
             this._updateUI();
 
-            // Запускаем poll только если хоть что-то включено
-            if (this.state.spoof || this.state.blur || this.state.del) {
+            if (this.state.spoof || this.state.blur || this.state.del || this.state.pvz) {
                 this._runPoll();
             }
         }
 
         _bindEvents() {
-            const { btnSpoof, btnBlur, btnDel, refresh, reset, hideToggle } = this.el;
+            const { btnSpoof, btnBlur, btnDel, btnPvz, refresh, reset, hideToggle } = this.el;
 
             btnSpoof.addEventListener('click', () => this._toggle('spoof'));
             btnBlur.addEventListener('click',  () => this._toggle('blur'));
             btnDel.addEventListener('click',   () => this._toggle('del'));
-
-            refresh.addEventListener('click', () => this._fetchSpoof());
-
-            reset.addEventListener('click', () => {
-                this._resetAll();
-            });
+            btnPvz.addEventListener('click',   () => this._toggle('pvz'));
+            refresh.addEventListener('click',  () => this._fetchSpoof());
+            reset.addEventListener('click',    () => this._resetAll());
 
             hideToggle.addEventListener('click', () => {
                 this.toggle.classList.add('hidden-mode');
@@ -236,48 +247,37 @@
                 setTimeout(() => this.box.classList.remove('show'), 200);
             });
 
-            // Восстановление кнопки через Tampermonkey menu — при любом клике по странице
-            // кнопка становится видима снова если пользователь через консоль/TM сбросит флаг
-            // Здесь просто не прячем навсегда: кнопка восстанавливается при перезагрузке если флаг сброшен
             if (GM_getValue('ozon_ha_btn_hidden', false)) {
                 this.toggle.classList.add('hidden-mode');
-                // Показываем box сразу без кнопки
                 this.box.style.display = 'flex';
             }
         }
 
         _toggle(mode) {
-            const was = this.state[mode];
-            this.state[mode] = !was;
-
-            const keyMap = { spoof: KEY_SPOOF_ON, blur: KEY_BLUR, del: KEY_DEL };
+            this.state[mode] = !this.state[mode];
+            const keyMap = { spoof: KEY_SPOOF_ON, blur: KEY_BLUR, del: KEY_DEL, pvz: KEY_PVZ };
             GM_setValue(keyMap[mode], this.state[mode]);
-
-            if (!this.state[mode]) {
-                // Выключаем — восстанавливаем
-                this._restoreMode(mode);
-            }
-
+            if (!this.state[mode]) this._restoreMode(mode);
             this._updateUI();
             this._managePoll();
             if (this.state[mode]) this._tick();
         }
 
         _resetAll() {
-            ['spoof', 'blur', 'del'].forEach(m => {
+            ['spoof', 'blur', 'del', 'pvz'].forEach(m => {
                 if (this.state[m]) this._restoreMode(m);
                 this.state[m] = false;
             });
             GM_setValue(KEY_SPOOF_ON, false);
             GM_setValue(KEY_BLUR, false);
             GM_setValue(KEY_DEL, false);
+            GM_setValue(KEY_PVZ, false);
             this._updateUI();
             this._managePoll();
         }
 
         _restoreMode(mode) {
             if (mode === 'spoof') {
-                // Восстанавливаем оригинальный текст
                 this._origTexts.forEach((orig, node) => {
                     if (document.contains(node)) node.textContent = orig;
                 });
@@ -294,34 +294,48 @@
                 this._delNodes.forEach(n => {
                     if (document.contains(n)) {
                         n.style.visibility = '';
-                        n.style.pointerEvents = '';
-                        // Восстанавливаем высоту
                         n.style.height = '';
                         n.style.overflow = '';
                         n.style.margin = '';
                         n.style.padding = '';
+                        n.style.pointerEvents = '';
                     }
                 });
                 this._delNodes.clear();
-                document.querySelectorAll('[data-ha-del]').forEach(n => {
-                    delete n.dataset.haDel;
+                document.querySelectorAll('[data-ha-del]').forEach(n => { delete n.dataset.haDel; });
+            }
+            if (mode === 'pvz') {
+                // Восстанавливаем адреса ПВЗ
+                this._pvzOrigTexts.forEach((orig, node) => {
+                    if (document.contains(node)) node.textContent = orig;
+                });
+                this._pvzOrigTexts.clear();
+                // Восстанавливаем номера ПВЗ
+                document.querySelectorAll('[data-ha-pvz-num]').forEach(n => {
+                    n.textContent = n.dataset.haPvzNum;
+                    delete n.dataset.haPvzNum;
+                });
+                // Убираем blur с ПВЗ
+                document.querySelectorAll('[data-ha-pvz-blur]').forEach(n => {
+                    n.style.filter = '';
+                    n.style.userSelect = '';
+                    delete n.dataset.haPvzBlur;
                 });
             }
         }
 
         _updateUI() {
-            const { btnSpoof, btnBlur, btnDel, spoofBlock } = this.el;
+            const { btnSpoof, btnBlur, btnDel, btnPvz, spoofBlock } = this.el;
             btnSpoof.className = 'ha-btn' + (this.state.spoof ? ' on-spoof' : '');
             btnBlur.className  = 'ha-btn' + (this.state.blur  ? ' on-blur'  : '');
             btnDel.className   = 'ha-btn' + (this.state.del   ? ' on-del'   : '');
+            btnPvz.className   = 'ha-btn' + (this.state.pvz   ? ' on-pvz'   : '');
             spoofBlock.classList.toggle('visible', this.state.spoof);
-            if (this.state.spoof && this.spoofAddress) {
-                this._updateSpoofLabel(this.spoofAddress);
-            }
+            if (this.state.spoof && this.spoofAddress) this._updateSpoofLabel(this.spoofAddress);
         }
 
         _managePoll() {
-            const anyOn = this.state.spoof || this.state.blur || this.state.del;
+            const anyOn = this.state.spoof || this.state.blur || this.state.del || this.state.pvz;
             if (anyOn && !this._pollTimer) {
                 this._runPoll();
             } else if (!anyOn && this._pollTimer) {
@@ -336,18 +350,17 @@
         }
 
         _tick() {
-            // Порядок: сначала spoof (подменяем текст), потом blur, потом del
             if (this.state.spoof) this._applySpoof();
             if (this.state.blur)  this._applyBlur();
             if (this.state.del)   this._applyDel();
+            if (this.state.pvz)   this._applyPvz();
         }
 
-        // MutationObserver — реагирует мгновенно на появление новых узлов адреса
         _startObserver() {
             this._observer = new MutationObserver(() => {
-                if (this.state.spoof || this.state.blur || this.state.del) this._tick();
+                if (this.state.spoof || this.state.blur || this.state.del || this.state.pvz) this._tick();
             });
-            const startObs = () => {
+            const start = () => {
                 if (document.body) {
                     this._observer.observe(document.body, { childList: true, subtree: true });
                 } else {
@@ -356,23 +369,18 @@
                     });
                 }
             };
-            startObs();
+            start();
         }
 
         _applySpoof() {
             if (!this.spoofAddress) {
-                // Нет адреса — загружаем
                 if (!this._spoofLoading) this._fetchSpoof();
                 return;
             }
             const addr = this._stripCountryPrefix(this.spoofAddress);
             this._getAddressNodes().forEach(node => {
-                if (!this._origTexts.has(node)) {
-                    this._origTexts.set(node, node.textContent);
-                }
-                if (node.textContent !== addr) {
-                    node.textContent = addr;
-                }
+                if (!this._origTexts.has(node)) this._origTexts.set(node, node.textContent);
+                if (node.textContent !== addr) node.textContent = addr;
             });
         }
 
@@ -387,8 +395,6 @@
         }
 
         _applyDel() {
-            // Скрываем контейнеры целиком через visibility+height=0
-            // чтобы не оставалось пустых мест и оставаясь в DOM
             document.querySelectorAll(SEL_CONTAINER).forEach(container => {
                 if (!container.dataset.haDel) {
                     container.dataset.haDel = '1';
@@ -403,13 +409,41 @@
             });
         }
 
+        _applyPvz() {
+            // Подменяем/размываем адреса в карточках ПВЗ
+            document.querySelectorAll(SEL_PVZ_ADDR).forEach(node => {
+                if (!this._pvzOrigTexts.has(node)) {
+                    this._pvzOrigTexts.set(node, node.textContent);
+                }
+                // Если spoof включён — используем spoof-адрес (без города, только улица)
+                // Иначе blur
+                if (this.state.spoof && this.spoofAddress) {
+                    const addr = this._stripCountryPrefix(this.spoofAddress);
+                    if (node.textContent !== addr) node.textContent = addr;
+                } else if (!node.dataset.haPvzBlur) {
+                    node.dataset.haPvzBlur = '1';
+                    node.style.filter = 'blur(5px)';
+                    node.style.userSelect = 'none';
+                }
+            });
+
+            // Заменяем номера ПВЗ на нули
+            document.querySelectorAll(SEL_PVZ_NUM).forEach(node => {
+                if (!node.dataset.haPvzNum) {
+                    // Сохраняем оригинал в data-атрибуте для восстановления
+                    node.dataset.haPvzNum = node.textContent;
+                    // Генерируем псевдо-номер в том же формате (сегменты через дефис)
+                    const fake = node.textContent.replace(/\d+/g, seg => '0'.repeat(seg.length));
+                    node.textContent = fake;
+                }
+            });
+        }
+
         _getAddressNodes() {
             return [...document.querySelectorAll(SEL_ADDR)];
         }
 
         _stripCountryPrefix(full) {
-            // "Россия, г. Петропавловск-Камчатский, Радужная ул., д. 14 кв.65"
-            // Ищем часть с улицей, начиная с третьего элемента (после "Россия, г. Город")
             const parts = full.split(',');
             if (parts.length >= 3) return parts.slice(2).join(',').trim();
             return full;
@@ -430,12 +464,18 @@
                         const data = JSON.parse(res.responseText);
                         const raw = Array.isArray(data) ? data[0]?.Address : data?.Address;
                         if (!raw) throw new Error('no address');
-                        // Сбрасываем spoof-метки чтобы _applySpoof обновил текст
                         this._origTexts.clear();
+                        this._pvzOrigTexts.clear();
+                        // Убираем pvz-blur чтобы пересмотреть в _applyPvz
+                        document.querySelectorAll('[data-ha-pvz-blur]').forEach(n => {
+                            n.style.filter = '';
+                            n.style.userSelect = '';
+                            delete n.dataset.haPvzBlur;
+                        });
                         this.spoofAddress = raw;
                         GM_setValue(KEY_SPOOF, raw);
                         this._updateSpoofLabel(raw);
-                        if (this.state.spoof) this._tick();
+                        if (this.state.spoof || this.state.pvz) this._tick();
                     } catch {
                         this.el.spoofAddr.innerHTML = '<em>Ошибка загрузки</em>';
                     }
@@ -482,7 +522,6 @@
         try { window.__ozonAddressHider = new AddressHider(); } catch (e) { console.error('OZON HA init error:', e); }
     };
 
-    // document-start — ждём body
     if (document.body) {
         init();
     } else {
