@@ -26,7 +26,7 @@
     const API_URL      = 'https://api.randomdatatools.ru/?count=1&params=Address';
     const POLL_MS      = 400;
 
-    // Адрес в хедере и карточке товара
+    // Адрес в хедере (правый верхний угол)
     const SEL_ADDR = [
         '[data-widget="addressBookBarWeb"] .checkout_a6o span.tsBody400Small',
         '[data-widget="addressBookBarWeb"] .checkout_oa6 span.tsBody400Small',
@@ -35,24 +35,28 @@
         '.checkout_ao9 .checkout_a6o span.tsBody400Small',
         '.checkout_ao9 .checkout_oa6 span.tsBody400Small',
         '.checkout_ap .tsBody400Small',
-        '.q6b3_2_2-a span.tsCompact400Small',
-        '.pdp_t6 span.tsCompact400Small',
     ].join(', ');
 
-    // Контейнеры адреса (для del) — намеренно узкие, чтобы не захватывать посторонние блоки
+    // Кандидаты адреса на PDP — фильтруются по содержимому в _getPdpAddressNodes
+    const SEL_PDP_ADDR_CANDIDATE = '.q6b3_2_2-a.pdp_t6 span.tsCompact400Small';
+
+    // Контейнеры адреса (для del) — только хедер; PDP обрабатывается отдельно в _applyDel
     const SEL_CONTAINER = [
         '[data-widget="addressBookBarWeb"] .checkout_ao9',
         '[data-addressbookbar] .checkout_ao9',
-        // хедер: внешний блок адресной строки (содержит .checkout_oa6 / .checkout_a6o)
         '.checkout_o8a.checkout_ao9',
-        // карточка товара — только span-обёртка с адресом, не весь .q6b3_2_2-a
-        '.pdp_t6',
     ].join(', ');
 
-    // Адреса в карточках ПВЗ (меню выбора)
-    const SEL_PVZ_ADDR = '.checkout_a6q span.tsBody400Small';
-    // Номера ПВЗ
-    const SEL_PVZ_NUM  = '.checkout_q6a span.tsBody300XSmall';
+    // Эвристика адреса: содержит адресное слово + цифру, но не содержит символ валюты
+    const RE_LOOKS_LIKE_ADDR = /(?:ул\.|пр\.|пер\.|пр-т|бул\.|шоссе|пл\.|наб\.|туп\.|д\.|к\.|кв\.|корп\.|стр\.|влад\.|обл\.|г\.)\s*\d|\d.*(?:,|к\.|корп\.)|,\s*\d/i;
+    const RE_NOT_ADDR = /[₽$€]/;
+
+    // Адреса в карточках ПВЗ (открытые и закрытые ПВЗ)
+    const SEL_PVZ_ADDR = '.checkout_aq6 .checkout_qa6 span.tsBody400Small, .checkout_a6q .checkout_qa6 span.tsBody400Small';
+    // Номера ПВЗ (№ 123-23-43)
+    const SEL_PVZ_NUM  = '.checkout_aq7 span.tsBody300XSmall';
+    // Адрес ПВЗ содержит запятую — отличает "Москва, ул. ..." от "Срок хранения..." и "Пункт закрыт"
+    const RE_PVZ_ADDR  = /,/;
 
     GM_registerMenuCommand('🔒 Показать кнопку скрипта', () => {
         GM_setValue('ozon_ha_btn_hidden', false);
@@ -60,9 +64,6 @@
         if (toggle) {
             toggle.classList.remove('hidden-mode');
             toggle.style.display = 'flex';
-        }
-        const box = document.getElementById('ozon-ha-box');
-        if (box && box.style.display === 'none') {
         }
     });
 
@@ -317,10 +318,10 @@
                         n.style.margin = '';
                         n.style.padding = '';
                         n.style.pointerEvents = '';
+                        delete n.dataset.haDel;
                     }
                 });
                 this._delNodes.clear();
-                document.querySelectorAll('[data-ha-del]').forEach(n => { delete n.dataset.haDel; });
             }
             if (mode === 'pvz') {
                 // Восстанавливаем адреса ПВЗ
@@ -378,16 +379,7 @@
             this._observer = new MutationObserver(() => {
                 if (this.state.spoof || this.state.blur || this.state.del || this.state.pvz) this._tick();
             });
-            const start = () => {
-                if (document.body) {
-                    this._observer.observe(document.body, { childList: true, subtree: true });
-                } else {
-                    document.addEventListener('DOMContentLoaded', () => {
-                        this._observer.observe(document.body, { childList: true, subtree: true });
-                    });
-                }
-            };
-            start();
+            this._observer.observe(document.body, { childList: true, subtree: true });
         }
 
         _applySpoof() {
@@ -412,53 +404,87 @@
             });
         }
 
+        _hideNode(node) {
+            if (node.dataset.haDel) return;
+            node.dataset.haDel = '1';
+            node.style.visibility = 'hidden';
+            node.style.height = '0';
+            node.style.overflow = 'hidden';
+            node.style.margin = '0';
+            node.style.padding = '0';
+            node.style.pointerEvents = 'none';
+            this._delNodes.add(node);
+        }
+
         _applyDel() {
-            document.querySelectorAll(SEL_CONTAINER).forEach(container => {
-                if (!container.dataset.haDel) {
-                    container.dataset.haDel = '1';
-                    container.style.visibility = 'hidden';
-                    container.style.height = '0';
-                    container.style.overflow = 'hidden';
-                    container.style.margin = '0';
-                    container.style.padding = '0';
-                    container.style.pointerEvents = 'none';
-                    this._delNodes.add(container);
-                }
+            // Хедер
+            document.querySelectorAll(SEL_CONTAINER).forEach(n => this._hideNode(n));
+            // PDP — только контейнеры, чей текст похож на адрес
+            this._getPdpAddressContainers().forEach(n => this._hideNode(n));
+            // ПВЗ — адресные строки и номера
+            document.querySelectorAll('.checkout_aq6 .checkout_qa6, .checkout_a6q .checkout_qa6').forEach(wrap => {
+                const span = wrap.querySelector('span.tsBody400Small');
+                if (span && RE_PVZ_ADDR.test(span.textContent)) this._hideNode(wrap);
             });
+            document.querySelectorAll('.checkout_aq7').forEach(n => this._hideNode(n));
         }
 
         _applyPvz() {
-            // Подменяем/размываем адреса в карточках ПВЗ
+            // Адреса в карточках ПВЗ (только строки с запятой — т.е. реальный адрес)
             document.querySelectorAll(SEL_PVZ_ADDR).forEach(node => {
+                if (!RE_PVZ_ADDR.test(node.textContent)) return;
                 if (!this._pvzOrigTexts.has(node)) {
                     this._pvzOrigTexts.set(node, node.textContent);
                 }
-                // Если spoof включён — используем spoof-адрес (без города, только улица)
-                // Иначе blur
                 if (this.state.spoof && this.spoofAddress) {
+                    // Spoof: снимаем blur если был, подменяем текст
+                    if (node.dataset.haPvzBlur) {
+                        node.style.filter = '';
+                        node.style.userSelect = '';
+                        delete node.dataset.haPvzBlur;
+                    }
                     const addr = this._stripCountryPrefix(this.spoofAddress);
                     if (node.textContent !== addr) node.textContent = addr;
-                } else if (!node.dataset.haPvzBlur) {
-                    node.dataset.haPvzBlur = '1';
-                    node.style.filter = 'blur(5px)';
-                    node.style.userSelect = 'none';
+                } else {
+                    // Только pvz без spoof — blur
+                    if (!node.dataset.haPvzBlur) {
+                        node.dataset.haPvzBlur = '1';
+                        node.style.filter = 'blur(5px)';
+                        node.style.userSelect = 'none';
+                    }
                 }
             });
 
-            // Заменяем номера ПВЗ на нули
+            // Заменяем номера ПВЗ на случайные цифры той же длины и формата
             document.querySelectorAll(SEL_PVZ_NUM).forEach(node => {
                 if (!node.dataset.haPvzNum) {
-                    // Сохраняем оригинал в data-атрибуте для восстановления
                     node.dataset.haPvzNum = node.textContent;
-                    // Генерируем псевдо-номер в том же формате (сегменты через дефис)
-                    const fake = node.textContent.replace(/\d+/g, seg => '0'.repeat(seg.length));
+                    const fake = node.textContent.replace(/\d+/g, seg =>
+                        Array.from({ length: seg.length }, () => Math.floor(Math.random() * 10)).join('')
+                    );
                     node.textContent = fake;
                 }
             });
         }
 
         _getAddressNodes() {
-            return [...document.querySelectorAll(SEL_ADDR)];
+            return [...document.querySelectorAll(SEL_ADDR), ...this._getPdpAddressNodes()];
+        }
+
+        // Узлы span.tsCompact400Small внутри .q6b3_2_2-a.pdp_t6, чей текст похож на адрес
+        _getPdpAddressNodes() {
+            return [...document.querySelectorAll(SEL_PDP_ADDR_CANDIDATE)]
+                .filter(n => RE_LOOKS_LIKE_ADDR.test(n.textContent) && !RE_NOT_ADDR.test(n.textContent));
+        }
+
+        // Контейнеры .q6b3_2_2-a.pdp_t6, у которых хотя бы один дочерний span похож на адрес
+        _getPdpAddressContainers() {
+            const result = [];
+            document.querySelectorAll('.q6b3_2_2-a.pdp_t6').forEach(container => {
+                const text = container.textContent;
+                if (RE_LOOKS_LIKE_ADDR.test(text) && !RE_NOT_ADDR.test(text)) result.push(container);
+            });
+            return result;
         }
 
         _stripCountryPrefix(full) {
