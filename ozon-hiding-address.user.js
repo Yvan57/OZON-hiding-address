@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OZON Hiding Address
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  Скрытие адреса на страницах ozon.ru: blur, удаление или подмена на случайный адрес
 // @author       Yvan57/OZON-hiding-address
 // @match        https://www.ozon.ru/*
@@ -9,6 +9,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_registerMenuCommand
 // @connect      api.randomdatatools.ru
 // @run-at       document-start
 // @noframes
@@ -47,6 +48,18 @@
     const SEL_PVZ_ADDR = '.checkout_a6q span.tsBody400Small';
     // Номера ПВЗ
     const SEL_PVZ_NUM  = '.checkout_q6a span.tsBody300XSmall';
+
+    GM_registerMenuCommand('🔒 Показать кнопку скрипта', () => {
+        GM_setValue('ozon_ha_btn_hidden', false);
+        const toggle = document.getElementById('ozon-ha-toggle');
+        if (toggle) {
+            toggle.classList.remove('hidden-mode');
+            toggle.style.display = 'flex';
+        }
+        const box = document.getElementById('ozon-ha-box');
+        if (box && box.style.display === 'none') {
+        }
+    });
 
     GM_addStyle(`
         #ozon-ha-box {
@@ -249,7 +262,7 @@
 
             if (GM_getValue('ozon_ha_btn_hidden', false)) {
                 this.toggle.classList.add('hidden-mode');
-                this.box.style.display = 'flex';
+                // Панель не открываем автоматически — пользователь откроет через меню TM
             }
         }
 
