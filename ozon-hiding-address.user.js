@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OZON Hiding Address
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  Скрытие адреса на страницах ozon.ru: blur, удаление или подмена на случайный адрес
 // @author       Yvan57/OZON-hiding-address
 // @match        https://www.ozon.ru/*
@@ -29,18 +29,23 @@
     // Адрес в хедере и карточке товара
     const SEL_ADDR = [
         '[data-widget="addressBookBarWeb"] .checkout_a6o span.tsBody400Small',
+        '[data-widget="addressBookBarWeb"] .checkout_oa6 span.tsBody400Small',
         '[data-addressbookbar] .checkout_a6o span.tsBody400Small',
+        '[data-addressbookbar] .checkout_oa6 span.tsBody400Small',
         '.checkout_ao9 .checkout_a6o span.tsBody400Small',
+        '.checkout_ao9 .checkout_oa6 span.tsBody400Small',
+        '.checkout_ap .tsBody400Small',
         '.q6b3_2_2-a span.tsCompact400Small',
         '.pdp_t6 span.tsCompact400Small',
     ].join(', ');
 
-    // Контейнеры адреса (для del)
+    // Контейнеры адреса (для del) — намеренно узкие, чтобы не захватывать посторонние блоки
     const SEL_CONTAINER = [
         '[data-widget="addressBookBarWeb"] .checkout_ao9',
         '[data-addressbookbar] .checkout_ao9',
-        '.checkout_ao9',
-        '.q6b3_2_2-a',
+        // хедер: внешний блок адресной строки (содержит .checkout_oa6 / .checkout_a6o)
+        '.checkout_o8a.checkout_ao9',
+        // карточка товара — только span-обёртка с адресом, не весь .q6b3_2_2-a
         '.pdp_t6',
     ].join(', ');
 
