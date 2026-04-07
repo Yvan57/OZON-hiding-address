@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OZON Hiding Address
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  Скрытие адреса на страницах ozon.ru: blur, удаление или подмена на случайный адрес
 // @author       Yvan57/OZON-hiding-address
 // @match        https://www.ozon.ru/*
@@ -110,8 +110,13 @@
             font-size: 10px; color: #444; background: #f8f9fa;
             border: 1px solid #e9ecef; border-radius: 6px; padding: 6px;
             word-break: break-word; line-height: 1.4;
+            width: 100%; box-sizing: border-box; resize: vertical; min-height: 36px;
+            font-family: inherit; outline: none;
         }
+        .ha-spoof-addr:focus { border-color: #34C759; }
         .ha-spoof-addr em { color: #999; font-style: normal; }
+        .ha-raw-row { display: flex; align-items: center; gap: 5px; }
+        .ha-raw-label { font-size: 10px; color: #888; white-space: nowrap; }
         .ha-spoof-row { display: flex; gap: 6px; align-items: center; }
         .ha-refresh {
             padding: 4px 10px; border-radius: 6px; cursor: pointer; font-weight: 600;
@@ -160,9 +165,13 @@
                     <button class="ha-btn" id="ha-btn-spoof">Подмена адреса</button>
                 </div>
                 <div class="ha-spoof-block" id="ha-spoof-block">
-                    <div class="ha-spoof-addr" id="ha-spoof-addr"><em>Адрес не загружен</em></div>
+                    <textarea class="ha-spoof-addr" id="ha-spoof-addr" rows="2" placeholder="Адрес не загружен"></textarea>
                     <div class="ha-spoof-row">
                         <button class="ha-refresh" id="ha-refresh">↺ Новый адрес</button>
+                        <div class="ha-raw-row">
+                            <input type="checkbox" id="ha-raw-mode">
+                            <label class="ha-raw-label" for="ha-raw-mode">Без форматирования</label>
+                        </div>
                     </div>
                 </div>
                 <div class="ha-row">
@@ -224,6 +233,7 @@
                 spoofBlock: box.querySelector('#ha-spoof-block'),
                 spoofAddr:  box.querySelector('#ha-spoof-addr'),
                 refresh:    box.querySelector('#ha-refresh'),
+                rawModeChk: box.querySelector('#ha-raw-mode'),
                 reset:      box.querySelector('#ha-reset'),
                 hideToggle: box.querySelector('#ha-hide-toggle'),
             };
@@ -247,6 +257,20 @@
             btnPvz.addEventListener('click',   () => this._toggle('pvz'));
             refresh.addEventListener('click',  () => this._fetchSpoof());
             reset.addEventListener('click',    () => this._resetAll());
+
+            // Ручное редактирование адреса в textarea
+            this.el.spoofAddr.addEventListener('input', () => {
+                const val = this.el.spoofAddr.value.trim();
+                if (!val) return;
+                this.spoofAddress = val;
+                GM_setValue(KEY_SPOOF, val);
+                if (this.state.spoof || this.state.pvz) this._tick();
+            });
+
+            // Чекбокс "Без форматирования" — обновляет отображение текущего адреса
+            this.el.rawModeChk.addEventListener('change', () => {
+                if (this.spoofAddress) this._updateSpoofLabel(this.spoofAddress);
+            });
 
             hideToggle.addEventListener('click', () => {
                 this.toggle.classList.add('hidden-mode');
@@ -382,12 +406,29 @@
             this._observer.observe(document.body, { childList: true, subtree: true });
         }
 
+        // Убирает квартиру/офис из конца адресной строки: "д. 22 кв.55" → "д. 22"
+        _stripApartment(addr) {
+            return addr.replace(/[\s,]+(?:кв\.?|оф\.?|офис|apartment|apt\.?)\s*\d+\s*$/i, '').trim();
+        }
+
+        // Хедер: улица + дом без города и без квартиры
+        _getSpoofText() {
+            if (this.el.rawModeChk.checked) return this.spoofAddress;
+            return this._stripApartment(this._stripCountryPrefix(this.spoofAddress));
+        }
+
+        // ПВЗ: город + улица + дом без страны и без квартиры
+        _getSpoofTextPvz() {
+            if (this.el.rawModeChk.checked) return this.spoofAddress;
+            return this._stripApartment(this._stripCountry(this.spoofAddress));
+        }
+
         _applySpoof() {
             if (!this.spoofAddress) {
                 if (!this._spoofLoading) this._fetchSpoof();
                 return;
             }
-            const addr = this._stripCountryPrefix(this.spoofAddress);
+            const addr = this._getSpoofText();
             this._getAddressNodes().forEach(node => {
                 if (!this._origTexts.has(node)) this._origTexts.set(node, node.textContent);
                 if (node.textContent !== addr) node.textContent = addr;
@@ -443,7 +484,7 @@
                         node.style.userSelect = '';
                         delete node.dataset.haPvzBlur;
                     }
-                    const addr = this._stripCountryPrefix(this.spoofAddress);
+                    const addr = this._getSpoofTextPvz();
                     if (node.textContent !== addr) node.textContent = addr;
                 } else {
                     // Только pvz без spoof — blur
@@ -487,7 +528,19 @@
             return result;
         }
 
+        // Убирает только страну: "Россия, г. Пенза, ул., д." → "г. Пенза, ул., д."
+        _stripCountry(full) {
+            const m = full.match(/,\s*(г\.?\s+.*)/i);
+            if (m) return m[1].trim();
+            const parts = full.split(',');
+            if (parts.length >= 2) return parts.slice(1).join(',').trim();
+            return full;
+        }
+
+        // Убирает страну и город: "Россия, г. Пенза, ул., д." → "ул., д."
         _stripCountryPrefix(full) {
+            const cityMatch = full.match(/,\s*г\.?\s+[^,]+,\s*(.*)/i);
+            if (cityMatch) return cityMatch[1].trim();
             const parts = full.split(',');
             if (parts.length >= 3) return parts.slice(2).join(',').trim();
             return full;
@@ -498,7 +551,7 @@
             this._spoofLoading = true;
             const btn = this.el.refresh;
             btn.disabled = true;
-            this.el.spoofAddr.innerHTML = '<em>Загрузка...</em>';
+            this.el.spoofAddr.value = 'Загрузка...';
 
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -521,13 +574,13 @@
                         this._updateSpoofLabel(raw);
                         if (this.state.spoof || this.state.pvz) this._tick();
                     } catch {
-                        this.el.spoofAddr.innerHTML = '<em>Ошибка загрузки</em>';
+                        this.el.spoofAddr.value = 'Ошибка загрузки';
                     }
                     this._spoofLoading = false;
                     btn.disabled = false;
                 },
                 onerror: () => {
-                    this.el.spoofAddr.innerHTML = '<em>Ошибка сети</em>';
+                    this.el.spoofAddr.value = 'Ошибка сети';
                     this._spoofLoading = false;
                     btn.disabled = false;
                 },
@@ -535,7 +588,8 @@
         }
 
         _updateSpoofLabel(raw) {
-            this.el.spoofAddr.textContent = this._stripCountryPrefix(raw);
+            const text = this.el.rawModeChk.checked ? raw : this._stripCountryPrefix(raw);
+            this.el.spoofAddr.value = text;
         }
 
         _makeDraggable(element, handle) {
